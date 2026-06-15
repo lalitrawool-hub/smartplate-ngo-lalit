@@ -3,6 +3,8 @@
 ![image_alt](https://github.com/Devadharshani13/SmartPlate-Redistribution-of-foods-through-NGO/blob/main/screenshot/home%20page.png?raw=true)
 
 ---
+## Demo Video link
+https://www.youtube.com/watch?v=Gse5J54AMA4
 
 ## 📌 Project Overview
 
