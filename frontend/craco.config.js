@@ -17,8 +17,12 @@ let setupDevServer;
 let babelMetadataPlugin;
 
 if (config.enableVisualEdits) {
-  setupDevServer = require("./plugins/visual-edits/dev-server-setup");
-  babelMetadataPlugin = require("./plugins/visual-edits/babel-metadata-plugin");
+    try {
+        setupDevServer = require("./plugins/visual-edits/dev-server-setup");
+        babelMetadataPlugin = require("./plugins/visual-edits/babel-metadata-plugin");
+    } catch (error) {
+        console.warn("Visual edits plugins are missing. Continuing without them.");
+    }
 }
 
 // Conditionally load health check modules only if enabled

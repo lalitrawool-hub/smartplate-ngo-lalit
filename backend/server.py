@@ -53,8 +53,8 @@ security = HTTPBearer()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 ADMIN_EMAILS = {
-    "smartplate.foodredistribution@gmail.com",
-    "sdeepalakshmi13@gmail.com"
+    "lalit.rawool045@gmail.com",
+    "lalit.rawool046@gmail.com"
 }
 
 
@@ -604,7 +604,7 @@ async def google_auth(request: GoogleAuthRequest):
 
         user_dict = new_user.model_dump()
         user_dict["created_at"] = user_dict["created_at"].isoformat()
-        await db.users.insert_one(user_dict)
+        await db.users.insert_one(user_dict.copy())
 
         token = create_jwt_token(new_user.id, new_user.email, role)
         return {"token": token, "user": user_dict}
