@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { requestApi } from '../services/api';
+import { API_BASE_URL } from '../config/api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -85,12 +86,16 @@ export const CreateRequestModal = ({ open, onOpenChange, onSuccess, verification
       // Enhanced error handling
       let errorMessage = 'Failed to create request';
       
-      if (error.response?.status === 401 || error.response?.status === 403) {
+      if (error.response?.status === 401) {
         errorMessage = 'Authentication required. Please log in again.';
       } else if (error.response?.data?.detail) {
         errorMessage = error.response.data.detail;
       } else if (error.response?.data?.message) {
         errorMessage = error.response.data.message;
+      } else if (error.response?.status === 403) {
+        errorMessage = 'Your account is not allowed to create this request. Check that your account is an approved NGO.';
+      } else if (error.code === 'ERR_NETWORK') {
+        errorMessage = `Cannot reach the backend API at ${API_BASE_URL.replace(/\/api$/, '')}. Check that the Render service is available and allows this website through CORS.`;
       } else if (error.message) {
         errorMessage = error.message;
       }
