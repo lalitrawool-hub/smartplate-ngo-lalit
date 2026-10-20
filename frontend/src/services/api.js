@@ -45,9 +45,6 @@ export const donorApi = {
       headers: { ...getAuthHeader(), 'Idempotency-Key': idempotencyKey },
     }),
 
-  getAvailableVolunteers: () =>
-    axios.get(`${API}/donor/available-volunteers`, { headers: getAuthHeader() }),
-  
   getFulfillments: () => 
     axios.get(`${API}/donor/fulfillments`, { headers: getAuthHeader() }),
 };

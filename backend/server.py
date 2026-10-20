@@ -897,32 +897,9 @@ async def confirm_receipt(request_id: str, user: Dict = Depends(get_current_user
 
 # ============ DONOR ENDPOINTS ============
 
-@api_router.get("/donor/available-volunteers")
-async def get_available_volunteers(user: Dict = Depends(get_current_user)):
-    """Return public profile details for verified volunteers a donor can select."""
-    if user.get("role") != "donor":
-        raise HTTPException(status_code=403, detail="Only donors can select delivery volunteers")
-
-    profiles = await db.volunteers.find(
-        {"status": "approved"},
-        {"user_id": 1, "transport_mode": 1, "delivery_count": 1, "performance_score": 1, "_id": 0}
-    ).to_list(200)
-
-    volunteers = []
-    for profile in profiles:
-        volunteer_user = await db.users.find_one(
-            {"id": profile["user_id"], "role": "volunteer", "is_active": {"$ne": False}},
-            {"id": 1, "name": 1, "picture": 1, "_id": 0}
-        )
-        if volunteer_user:
-            volunteers.append({**profile, "name": volunteer_user.get("name", "Volunteer"), "picture": volunteer_user.get("picture")})
-
-    return volunteers
-
 class FulfillmentCreate(BaseModel):
     request_id: str
     donor_type: Optional[str] = None
-    volunteer_id: Optional[str] = None
     quantity: int
     food_condition: str
     availability_time: str
@@ -946,8 +923,8 @@ async def create_fulfillment(
         raise HTTPException(status_code=400, detail="Choose self delivery or volunteer delivery")
     if data.delivery_method == "self" and not data.delivered:
         raise HTTPException(status_code=400, detail="Confirm that you have delivered the food")
-    if data.delivery_method == "volunteer" and (not data.volunteer_id or not data.geo_tag):
-        raise HTTPException(status_code=400, detail="Select a volunteer and capture your pickup location")
+    if data.delivery_method == "volunteer" and not data.geo_tag:
+        raise HTTPException(status_code=400, detail="Capture your pickup location so a volunteer can collect the food")
 
     if idempotency_key:
         existing = await db.fulfillments.find_one(
@@ -973,30 +950,12 @@ async def create_fulfillment(
                 detail=f"Only {max(requested_quantity - current_pledged, 0)} servings remain for this request",
             )
 
-        selected_volunteer_name = None
-        if data.delivery_method == "volunteer":
-            volunteer = await db.volunteers.find_one(
-                {"user_id": data.volunteer_id, "status": "approved"}, {"_id": 0}, session=session
-            )
-            if not volunteer:
-                raise HTTPException(status_code=400, detail="The selected volunteer is no longer available")
-            volunteer_user = await db.users.find_one(
-                {"id": data.volunteer_id, "role": "volunteer", "is_active": {"$ne": False}},
-                {"name": 1, "_id": 0},
-                session=session,
-            )
-            if not volunteer_user:
-                raise HTTPException(status_code=400, detail="The selected volunteer is no longer available")
-            selected_volunteer_name = volunteer_user.get("name", "Volunteer")
-
         initial_status = "delivered" if data.delivery_method == "self" and data.delivered else "pending"
         fulfillment = DonorFulfillment(
             request_id=data.request_id,
             donor_id=user["id"],
             donor_name=user.get("name", "Anonymous Donor"),
             donor_type=data.donor_type,
-            volunteer_id=data.volunteer_id if data.delivery_method == "volunteer" else None,
-            volunteer_name=selected_volunteer_name,
             idempotency_key=idempotency_key,
             quantity=data.quantity,
             food_condition=data.food_condition,
@@ -1039,12 +998,11 @@ async def create_fulfillment(
                 request_id=data.request_id,
                 donor_id=user["id"],
                 ngo_id=request["ngo_id"],
-                volunteer_id=data.volunteer_id,
                 pickup_location=data.geo_tag,
                 pickup_address="Donor pickup location",
                 dropoff_location=request.get("location", {"lat": 0, "lng": 0}),
                 dropoff_address=request.get("address", "NGO location"),
-                status="assigned",
+                status="pending",
             )
             delivery_document = delivery.model_dump()
             delivery_document["created_at"] = delivery_document["created_at"].isoformat()
@@ -1171,14 +1129,27 @@ async def accept_delivery(delivery_id: str, user: Dict = Depends(get_current_use
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
     
-    if delivery.get("volunteer_id") and delivery.get("volunteer_id") != user["id"]:
-        raise HTTPException(status_code=400, detail="Delivery already assigned")
-    
-    await db.deliveries.update_one(
-        {"id": delivery_id},
+    if delivery.get("volunteer_id") == user["id"] and delivery.get("status") == "assigned":
+        await db.fulfillments.update_one(
+            {"id": delivery["fulfillment_id"]},
+            {"$set": {"volunteer_id": user["id"], "volunteer_name": user.get("name", "Volunteer")}}
+        )
+        return {"message": "Delivery already assigned to you"}
+    if delivery.get("status") != "pending" or delivery.get("volunteer_id"):
+        raise HTTPException(status_code=409, detail="This delivery is no longer available")
+
+    result = await db.deliveries.update_one(
+        {"id": delivery_id, "status": "pending", "volunteer_id": None},
         {"$set": {"volunteer_id": user["id"], "status": "assigned"}}
     )
-    
+    if not result.modified_count:
+        raise HTTPException(status_code=409, detail="Another volunteer accepted this delivery. Refresh to see available deliveries")
+
+    await db.fulfillments.update_one(
+        {"id": delivery["fulfillment_id"]},
+        {"$set": {"volunteer_id": user["id"], "volunteer_name": user.get("name", "Volunteer")}}
+    )
+
     return {"message": "Delivery accepted"}
 
 @api_router.post("/volunteer/deliveries/{delivery_id}/pickup")

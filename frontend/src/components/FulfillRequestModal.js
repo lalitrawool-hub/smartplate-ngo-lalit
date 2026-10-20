@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { donorApi, utilityApi } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -34,37 +34,14 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
     food_condition: '',
     availability_time: '',
     delivery_method: '',
-    volunteer_id: '',
     food_photo: null,
     geo_tag: userLocation || null,
     delivered: false,
   });
   const [photoPreview, setPhotoPreview] = useState(null);
-  const [volunteers, setVolunteers] = useState([]);
-  const [volunteersLoading, setVolunteersLoading] = useState(false);
   const fileInputRef = useRef(null);
   const submissionRef = useRef(null);
   const submittingRef = useRef(false);
-
-  useEffect(() => {
-    if (!open || formData.delivery_method !== 'volunteer') return undefined;
-
-    let active = true;
-    setVolunteersLoading(true);
-    donorApi.getAvailableVolunteers()
-      .then((response) => {
-        if (active) setVolunteers(response.data || []);
-      })
-      .catch((error) => {
-        console.error('Volunteer list error:', error);
-        if (active) toast.error(error.response?.data?.detail || 'Could not load verified volunteers');
-      })
-      .finally(() => {
-        if (active) setVolunteersLoading(false);
-      });
-
-    return () => { active = false; };
-  }, [open, formData.delivery_method]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -135,11 +112,6 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
       return;
     }
 
-    if (formData.delivery_method === 'volunteer' && !formData.volunteer_id) {
-      toast.error('Please select a verified volunteer');
-      return;
-    }
-
     if (formData.delivery_method === 'volunteer' && !formData.geo_tag) {
       toast.error('Capture your pickup location so the volunteer knows where to collect the food');
       return;
@@ -157,7 +129,6 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
         food_condition: formData.food_condition,
         availability_time: new Date(formData.availability_time).toISOString(),
         delivery_method: formData.delivery_method,
-        volunteer_id: formData.delivery_method === 'volunteer' ? formData.volunteer_id : null,
         food_photo: formData.food_photo,
         geo_tag: formData.geo_tag,
         delivered: formData.delivery_method === 'self' ? formData.delivered : false,
@@ -189,7 +160,6 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
           food_photo: null,
           geo_tag: null,
           delivered: false,
-          volunteer_id: '',
         });
         setPhotoPreview(null);
       }, 1500);
@@ -386,7 +356,6 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
               onValueChange={(value) => setFormData(prev => ({
                 ...prev,
                 delivery_method: value,
-                volunteer_id: value === 'volunteer' ? prev.volunteer_id : '',
               }))}
             >
               <SelectTrigger data-testid="delivery-method-select">
@@ -409,31 +378,6 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
             </Select>
           </div>
 
-          {formData.delivery_method === 'volunteer' && (
-            <div className="space-y-2">
-              <Label htmlFor="volunteer_id">Choose a verified volunteer *</Label>
-              <Select
-                value={formData.volunteer_id || ''}
-                onValueChange={(value) => setFormData(prev => ({ ...prev, volunteer_id: value }))}
-                disabled={volunteersLoading || volunteers.length === 0}
-              >
-                <SelectTrigger id="volunteer_id" data-testid="volunteer-select">
-                  <SelectValue placeholder={volunteersLoading ? 'Loading volunteers...' : 'Select a volunteer'} />
-                </SelectTrigger>
-                <SelectContent>
-                  {volunteers.map((volunteer) => (
-                    <SelectItem key={volunteer.user_id} value={volunteer.user_id}>
-                      {volunteer.name}{volunteer.transport_mode ? ` · ${volunteer.transport_mode}` : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {!volunteersLoading && volunteers.length === 0 && (
-                <p className="text-sm text-muted-foreground">No verified volunteers are available yet. Choose self delivery or try again later.</p>
-              )}
-            </div>
-          )}
-
           {formData.delivery_method === 'self' && (
             <div className="flex items-start space-x-3 p-4 bg-accent/10 rounded-xl border border-accent/20">
               <Checkbox
@@ -454,6 +398,11 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
                 </p>
               </div>
             </div>
+          )}
+          {formData.delivery_method === 'volunteer' && (
+            <p className="text-sm text-muted-foreground">
+              Your pickup will appear to verified volunteers, and the first available volunteer to accept it will be assigned.
+            </p>
           )}
           
           <div className="space-y-2">
