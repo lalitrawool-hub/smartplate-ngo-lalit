@@ -1,5 +1,5 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { Toaster } from "./components/ui/sonner";
 
@@ -10,6 +10,7 @@ import { NGODashboard } from "./pages/NGODashboard";
 import { DonorDashboard } from "./pages/DonorDashboard";
 import { VolunteerDashboard } from "./pages/VolunteerDashboard";
 import { AdminDashboard } from "./pages/AdminDashboard";
+import { PublicFoodRequestPage } from "./pages/PublicFoodRequestPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children, allowedRoles }) => {
@@ -41,6 +42,7 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
 // Auth Route - redirects if already logged in with role
 const AuthRoute = ({ children }) => {
   const { user, loading, isAuthenticated } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -51,7 +53,13 @@ const AuthRoute = ({ children }) => {
   }
 
   if (isAuthenticated && user?.role && user?.phone_verified) {
-    return <Navigate to={`/${user.role}`} replace />;
+    const returnTo = location.state?.returnTo;
+    const safeReturnTo = user.role === 'donor'
+      && typeof returnTo === 'string'
+      && /^\/donor\?request_id=[\w-]+$/.test(returnTo)
+      ? returnTo
+      : `/${user.role}`;
+    return <Navigate to={safeReturnTo} replace />;
   }
 
   return children;
@@ -72,6 +80,7 @@ function AppRoutes() {
           <AuthPage />
         </AuthRoute>
       } />
+      <Route path="/requests/:requestId" element={<PublicFoodRequestPage />} />
       
       {/* NGO Dashboard */}
       <Route path="/ngo" element={

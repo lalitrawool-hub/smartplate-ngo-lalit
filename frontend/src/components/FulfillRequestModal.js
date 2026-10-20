@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { donorApi, utilityApi } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -34,12 +34,37 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
     food_condition: '',
     availability_time: '',
     delivery_method: '',
+    volunteer_id: '',
     food_photo: null,
     geo_tag: userLocation || null,
     delivered: false,
   });
   const [photoPreview, setPhotoPreview] = useState(null);
+  const [volunteers, setVolunteers] = useState([]);
+  const [volunteersLoading, setVolunteersLoading] = useState(false);
   const fileInputRef = useRef(null);
+  const submissionRef = useRef(null);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    if (!open || formData.delivery_method !== 'volunteer') return undefined;
+
+    let active = true;
+    setVolunteersLoading(true);
+    donorApi.getAvailableVolunteers()
+      .then((response) => {
+        if (active) setVolunteers(response.data || []);
+      })
+      .catch((error) => {
+        console.error('Volunteer list error:', error);
+        if (active) toast.error(error.response?.data?.detail || 'Could not load verified volunteers');
+      })
+      .finally(() => {
+        if (active) setVolunteersLoading(false);
+      });
+
+    return () => { active = false; };
+  }, [open, formData.delivery_method]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -109,6 +134,19 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
       toast.error('Please confirm that the food has been delivered');
       return;
     }
+
+    if (formData.delivery_method === 'volunteer' && !formData.volunteer_id) {
+      toast.error('Please select a verified volunteer');
+      return;
+    }
+
+    if (formData.delivery_method === 'volunteer' && !formData.geo_tag) {
+      toast.error('Capture your pickup location so the volunteer knows where to collect the food');
+      return;
+    }
+
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     
     setLoading(true);
     try {
@@ -119,14 +157,21 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
         food_condition: formData.food_condition,
         availability_time: new Date(formData.availability_time).toISOString(),
         delivery_method: formData.delivery_method,
+        volunteer_id: formData.delivery_method === 'volunteer' ? formData.volunteer_id : null,
         food_photo: formData.food_photo,
         geo_tag: formData.geo_tag,
-        status: formData.delivery_method === 'self' && formData.delivered ? 'delivered' : 'pending',
         delivered: formData.delivery_method === 'self' ? formData.delivered : false,
       };
+
+      const signature = JSON.stringify(submitData);
+      if (submissionRef.current?.signature !== signature) {
+        const key = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        submissionRef.current = { signature, key };
+      }
+
+      await donorApi.createFulfillment(submitData, submissionRef.current.key);
       
-      const response = await donorApi.createFulfillment(submitData);
-      
+      submissionRef.current = null;
       setSuccess(true);
       toast.success('Donation submitted successfully! Thank you for your generosity!');
       
@@ -144,6 +189,7 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
           food_photo: null,
           geo_tag: null,
           delivered: false,
+          volunteer_id: '',
         });
         setPhotoPreview(null);
       }, 1500);
@@ -153,18 +199,23 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
       
       let errorMessage = 'Failed to submit fulfillment';
       
-      if (error.response?.status === 401 || error.response?.status === 403) {
+      if (error.response?.status === 401) {
         errorMessage = 'Authentication required. Please log in again.';
       } else if (error.response?.data?.detail) {
         errorMessage = error.response.data.detail;
       } else if (error.response?.data?.message) {
         errorMessage = error.response.data.message;
+      } else if (error.response?.status === 403) {
+        errorMessage = 'Your account is not allowed to submit this donation.';
+      } else if (error.code === 'ERR_NETWORK') {
+        errorMessage = 'The server did not confirm the donation. You can retry safely; duplicate submissions are protected.';
       } else if (error.message) {
         errorMessage = error.message;
       }
       
       toast.error(errorMessage);
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   };
@@ -332,7 +383,11 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
             <Label htmlFor="delivery_method">Delivery Method *</Label>
             <Select 
               value={formData.delivery_method} 
-              onValueChange={(value) => setFormData(prev => ({ ...prev, delivery_method: value }))}
+              onValueChange={(value) => setFormData(prev => ({
+                ...prev,
+                delivery_method: value,
+                volunteer_id: value === 'volunteer' ? prev.volunteer_id : '',
+              }))}
             >
               <SelectTrigger data-testid="delivery-method-select">
                 <SelectValue placeholder="Select delivery method" />
@@ -353,6 +408,31 @@ export const FulfillRequestModal = ({ request, open, onOpenChange, onSuccess, us
               </SelectContent>
             </Select>
           </div>
+
+          {formData.delivery_method === 'volunteer' && (
+            <div className="space-y-2">
+              <Label htmlFor="volunteer_id">Choose a verified volunteer *</Label>
+              <Select
+                value={formData.volunteer_id || ''}
+                onValueChange={(value) => setFormData(prev => ({ ...prev, volunteer_id: value }))}
+                disabled={volunteersLoading || volunteers.length === 0}
+              >
+                <SelectTrigger id="volunteer_id" data-testid="volunteer-select">
+                  <SelectValue placeholder={volunteersLoading ? 'Loading volunteers...' : 'Select a volunteer'} />
+                </SelectTrigger>
+                <SelectContent>
+                  {volunteers.map((volunteer) => (
+                    <SelectItem key={volunteer.user_id} value={volunteer.user_id}>
+                      {volunteer.name}{volunteer.transport_mode ? ` · ${volunteer.transport_mode}` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!volunteersLoading && volunteers.length === 0 && (
+                <p className="text-sm text-muted-foreground">No verified volunteers are available yet. Choose self delivery or try again later.</p>
+              )}
+            </div>
+          )}
 
           {formData.delivery_method === 'self' && (
             <div className="flex items-start space-x-3 p-4 bg-accent/10 rounded-xl border border-accent/20">

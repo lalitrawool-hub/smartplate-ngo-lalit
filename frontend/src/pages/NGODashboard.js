@@ -17,7 +17,8 @@ import {
   Package,
   TrendingUp,
   FileText,
-  MapPin
+  MapPin,
+  Share2
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -61,12 +62,37 @@ export const NGODashboard = () => {
     }
   };
 
+  const handleShareRequest = async (request) => {
+    const url = `${window.location.origin}/requests/${request.id}`;
+    const shareData = {
+      title: `${request.food_type} food request from ${request.ngo_name || verification?.organization_name || 'SmartPlate NGO'}`,
+      text: `Help fulfill this ${request.urgency_level || 'food'} food request on SmartPlate.`,
+      url,
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        toast.success('Public request link copied');
+      } else {
+        window.prompt('Copy this public request link:', url);
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        toast.error('Could not share the request. Copy this link instead: ' + url);
+      }
+    }
+  };
+
   const getStatusBadge = (status) => {
     const statusConfig = {
       pending: { color: 'bg-warning text-warning-foreground', icon: Clock },
       approved: { color: 'bg-success text-success-foreground', icon: CheckCircle2 },
       rejected: { color: 'bg-destructive text-destructive-foreground', icon: AlertCircle },
       active: { color: 'bg-primary text-primary-foreground', icon: Package },
+      awaiting_delivery: { color: 'bg-warning text-warning-foreground', icon: Clock },
       fulfilled: { color: 'bg-success text-success-foreground', icon: CheckCircle2 },
     };
     const config = statusConfig[status] || statusConfig.pending;
@@ -75,7 +101,7 @@ export const NGODashboard = () => {
     return (
       <Badge className={`${config.color} flex items-center gap-1`}>
         <Icon className="h-3 w-3" />
-        {status.charAt(0).toUpperCase() + status.slice(1)}
+        {status.replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase())}
       </Badge>
     );
   };
@@ -216,12 +242,27 @@ export const NGODashboard = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
+                        {['pending', 'approved', 'active', 'awaiting_delivery', 'fulfilled'].includes(request.status) && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="rounded-full"
+                            onClick={() => handleShareRequest(request)}
+                            data-testid={`share-request-${request.id}`}
+                          >
+                            <Share2 className="h-4 w-4 mr-2" />
+                            Share
+                          </Button>
+                        )}
                         {request.fulfilled_quantity > 0 && (
                           <span className="text-sm text-muted-foreground">
-                            {request.fulfilled_quantity}/{request.quantity} fulfilled
+                            {request.fulfilled_quantity}/{request.quantity} pledged · {request.confirmed_quantity || 0} received
                           </span>
                         )}
-                        {request.status === 'active' && request.fulfilled_quantity >= request.quantity && (
+                        {request.status === 'fulfilled' && (
+                          <Badge className="bg-success text-success-foreground">Order Completed</Badge>
+                        )}
+                        {request.ready_to_confirm && request.status !== 'fulfilled' && (
                           <Button 
                             size="sm" 
                             variant="outline"

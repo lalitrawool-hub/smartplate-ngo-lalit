@@ -1,4 +1,4 @@
-const DEPLOYED_BACKEND_URL = 'https://sp-2-p4ud.onrender.com';
+const DEPLOYED_BACKEND_URL = 'https://smartplate-ngo-lalit.onrender.com';
 const configuredBackendUrl = process.env.REACT_APP_BACKEND_URL?.trim();
 
 const isLoopbackUrl = (value) => {

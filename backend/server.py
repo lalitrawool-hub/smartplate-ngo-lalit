@@ -1,10 +1,11 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 import os
 import logging
 from pathlib import Path
@@ -127,6 +128,7 @@ class FoodRequest(BaseModel):
     ngo_id: str
     ngo_name: str
     food_type: str  # cooked, packaged, raw, mixed
+    food_category: Optional[str] = None
     quantity: int  # number of servings
     urgency_level: str = "medium"  # low, medium, high, critical
     ai_urgency_score: Optional[float] = None
@@ -137,6 +139,7 @@ class FoodRequest(BaseModel):
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     fulfilled_quantity: int = 0
+    confirmed_quantity: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: Optional[datetime] = None
 
@@ -147,6 +150,9 @@ class DonorFulfillment(BaseModel):
     donor_id: str
     donor_name: str
     donor_type: Optional[str] = None
+    volunteer_id: Optional[str] = None
+    volunteer_name: Optional[str] = None
+    idempotency_key: Optional[str] = None
     quantity: int
     food_condition: str  # fresh, cooked, packed
     availability_time: datetime
@@ -156,6 +162,7 @@ class DonorFulfillment(BaseModel):
     delivered: bool = False
     status: str = "pending"  # pending, accepted, picked_up, delivered, confirmed
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    confirmed_at: Optional[datetime] = None
 
 class Delivery(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -705,12 +712,22 @@ async def get_ngo_requests(user: Dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only NGO users can access this")
     
     requests = await db.food_requests.find({"ngo_id": user["id"]}, {"_id": 0}).to_list(100)
+    for request in requests:
+        delivered = await db.fulfillments.find(
+            {"request_id": request["id"], "status": "delivered"},
+            {"quantity": 1, "_id": 0}
+        ).to_list(500)
+        delivered_legacy = await db.deliveries.find_one(
+            {"request_id": request["id"], "status": "delivered"}, {"_id": 1}
+        )
+        request["ready_to_confirm"] = bool(delivered) or bool(delivered_legacy)
     return requests
 
 # ============ FOOD REQUEST ENDPOINTS ============
 
 class FoodRequestCreate(BaseModel):
     food_type: str
+    food_category: Optional[str] = None
     quantity: int
     urgency_level: str = "medium"
     description: Optional[str] = None
@@ -775,6 +792,23 @@ async def get_food_requests(
     
     return requests
 
+@api_router.get("/public/requests/{request_id}")
+async def get_public_food_request(request_id: str):
+    """Return a deliberately limited view that NGOs can share with donors."""
+    request = await db.food_requests.find_one(
+        {"id": request_id, "status": {"$in": ["pending", "approved", "active", "awaiting_delivery", "fulfilled"]}},
+        {"_id": 0},
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="This food request is not published or no longer available")
+
+    public_fields = (
+        "id", "ngo_name", "food_type", "food_category", "quantity", "fulfilled_quantity",
+        "confirmed_quantity", "urgency_level", "description", "location", "address", "status",
+        "created_at", "expires_at",
+    )
+    return {field: request[field] for field in public_fields if field in request}
+
 @api_router.get("/requests/{request_id}")
 async def get_food_request(request_id: str, user: Dict = Depends(get_current_user)):
     """Get a specific food request"""
@@ -793,25 +827,102 @@ async def confirm_receipt(request_id: str, user: Dict = Depends(get_current_user
     if not request:
         raise HTTPException(status_code=404, detail="Request not found")
     
+    now = datetime.now(timezone.utc).isoformat()
+    # Keep pre-workflow deliveries compatible: older versions tracked delivery state
+    # only on the delivery document, not on its linked fulfillment.
+    delivered_deliveries = await db.deliveries.find(
+        {"request_id": request_id, "status": "delivered"},
+        {"fulfillment_id": 1, "delivered_at": 1, "_id": 0}
+    ).to_list(500)
+    for delivery in delivered_deliveries:
+        await db.fulfillments.update_one(
+            {"id": delivery["fulfillment_id"], "status": {"$nin": ["delivered", "confirmed"]}},
+            {"$set": {"status": "delivered", "delivered": True, "delivered_at": delivery.get("delivered_at", now)}}
+        )
+
+    delivered = await db.fulfillments.find(
+        {"request_id": request_id, "status": "delivered"},
+        {"id": 1, "quantity": 1, "_id": 0}
+    ).to_list(500)
+
+    newly_confirmed = 0
+    for fulfillment in delivered:
+        result = await db.fulfillments.update_one(
+            {"id": fulfillment["id"], "status": "delivered"},
+            {"$set": {"status": "confirmed", "confirmed_at": now}}
+        )
+        if result.modified_count:
+            newly_confirmed += fulfillment.get("quantity", 0)
+            await db.deliveries.update_one(
+                {"fulfillment_id": fulfillment["id"], "status": "delivered"},
+                {"$set": {"status": "confirmed", "confirmed_at": now}}
+            )
+
+    confirmed_fulfillments = await db.fulfillments.find(
+        {"request_id": request_id, "status": "confirmed"}, {"id": 1, "_id": 0}
+    ).to_list(500)
+    for fulfillment in confirmed_fulfillments:
+        await db.deliveries.update_one(
+            {"fulfillment_id": fulfillment["id"], "status": "delivered"},
+            {"$set": {"status": "confirmed", "confirmed_at": now}}
+        )
+
+    all_fulfillments = await db.fulfillments.find(
+        {"request_id": request_id, "status": "confirmed"},
+        {"quantity": 1, "_id": 0}
+    ).to_list(500)
+    confirmed_quantity = sum(item.get("quantity", 0) for item in all_fulfillments)
+    pledged_quantity = request.get("fulfilled_quantity", 0)
+    request_quantity = request.get("quantity", 0)
+    if confirmed_quantity >= request_quantity:
+        new_status = "fulfilled"
+    elif pledged_quantity >= request_quantity:
+        new_status = "awaiting_delivery"
+    else:
+        new_status = "active"
+
     await db.food_requests.update_one(
         {"id": request_id},
-        {"$set": {"status": "fulfilled"}}
+        {"$set": {"status": new_status, "confirmed_quantity": confirmed_quantity}}
     )
-    
-    await db.deliveries.update_many(
-        {"request_id": request_id},
-        {"$set": {"status": "confirmed", "confirmed_at": datetime.now(timezone.utc).isoformat()}}
-    )
-    
-    await update_analytics("meals_delivered", request.get("fulfilled_quantity", 0))
-    
-    return {"message": "Receipt confirmed"}
+
+    if newly_confirmed:
+        await update_analytics("meals_delivered", newly_confirmed)
+
+    return {
+        "message": "Receipt confirmed" if newly_confirmed else "No new delivered food was waiting for confirmation",
+        "confirmed_quantity": confirmed_quantity,
+        "status": new_status,
+    }
 
 # ============ DONOR ENDPOINTS ============
+
+@api_router.get("/donor/available-volunteers")
+async def get_available_volunteers(user: Dict = Depends(get_current_user)):
+    """Return public profile details for verified volunteers a donor can select."""
+    if user.get("role") != "donor":
+        raise HTTPException(status_code=403, detail="Only donors can select delivery volunteers")
+
+    profiles = await db.volunteers.find(
+        {"status": "approved"},
+        {"user_id": 1, "transport_mode": 1, "delivery_count": 1, "performance_score": 1, "_id": 0}
+    ).to_list(200)
+
+    volunteers = []
+    for profile in profiles:
+        volunteer_user = await db.users.find_one(
+            {"id": profile["user_id"], "role": "volunteer", "is_active": {"$ne": False}},
+            {"id": 1, "name": 1, "picture": 1, "_id": 0}
+        )
+        if volunteer_user:
+            volunteers.append({**profile, "name": volunteer_user.get("name", "Volunteer"), "picture": volunteer_user.get("picture")})
+
+    return volunteers
 
 class FulfillmentCreate(BaseModel):
     request_id: str
     donor_type: Optional[str] = None
+    volunteer_id: Optional[str] = None
     quantity: int
     food_condition: str
     availability_time: str
@@ -821,68 +932,138 @@ class FulfillmentCreate(BaseModel):
     delivered: bool = False
 
 @api_router.post("/donor/fulfill")
-async def create_fulfillment(data: FulfillmentCreate, user: Dict = Depends(get_current_user)):
-    """Donor accepts to fulfill a food request"""
+async def create_fulfillment(
+    data: FulfillmentCreate,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    user: Dict = Depends(get_current_user),
+):
+    """Create a donation and its volunteer delivery as one retry-safe operation."""
     if user.get("role") != "donor":
         raise HTTPException(status_code=403, detail="Only donors can fulfill requests")
-    
-    request = await db.food_requests.find_one({"id": data.request_id}, {"_id": 0})
-    if not request:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    if request.get("status") not in ["approved", "active"]:
-        raise HTTPException(status_code=400, detail="Request is not available for fulfillment")
-    
-    initial_status = "pending"
-    if data.delivery_method == "self" and data.delivered:
-        initial_status = "delivered"
-    
-    fulfillment = DonorFulfillment(
-        request_id=data.request_id,
-        donor_id=user["id"],
-        donor_name=user.get("name", "Anonymous Donor"),
-        donor_type=data.donor_type,
-        quantity=data.quantity,
-        food_condition=data.food_condition,
-        availability_time=datetime.fromisoformat(data.availability_time.replace('Z', '+00:00')),
-        food_photo=data.food_photo,
-        geo_tag=data.geo_tag,
-        delivery_method=data.delivery_method,
-        delivered=data.delivered,
-        status=initial_status
-    )
-    
-    ful_dict = fulfillment.model_dump()
-    ful_dict['created_at'] = ful_dict['created_at'].isoformat()
-    ful_dict['availability_time'] = ful_dict['availability_time'].isoformat()
-    await db.fulfillments.insert_one(ful_dict)
-    
-    new_fulfilled = request.get("fulfilled_quantity", 0) + data.quantity
-    new_status = "active" if new_fulfilled < request.get("quantity", 0) else "fulfilled"
-    
-    await db.food_requests.update_one(
-        {"id": data.request_id},
-        {"$set": {"status": new_status, "fulfilled_quantity": new_fulfilled}}
-    )
-    
-    if data.delivery_method == "volunteer":
-        ngo_verification = await db.ngo_verifications.find_one({"user_id": request["ngo_id"]}, {"_id": 0})
-        
-        delivery = Delivery(
-            fulfillment_id=fulfillment.id,
+    if data.quantity < 1:
+        raise HTTPException(status_code=400, detail="Donation quantity must be at least one")
+    if data.delivery_method not in {"self", "volunteer"}:
+        raise HTTPException(status_code=400, detail="Choose self delivery or volunteer delivery")
+    if data.delivery_method == "self" and not data.delivered:
+        raise HTTPException(status_code=400, detail="Confirm that you have delivered the food")
+    if data.delivery_method == "volunteer" and (not data.volunteer_id or not data.geo_tag):
+        raise HTTPException(status_code=400, detail="Select a volunteer and capture your pickup location")
+
+    if idempotency_key:
+        existing = await db.fulfillments.find_one(
+            {"idempotency_key": idempotency_key, "donor_id": user["id"]}, {"_id": 0}
+        )
+        if existing:
+            if existing.get("request_id") != data.request_id:
+                raise HTTPException(status_code=409, detail="This submission key was already used for another request")
+            return {"message": "Fulfillment already submitted", "fulfillment": existing, "duplicate": True}
+
+    async def create_in_transaction(session):
+        request = await db.food_requests.find_one({"id": data.request_id}, {"_id": 0}, session=session)
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+        if request.get("status") not in {"approved", "active"}:
+            raise HTTPException(status_code=400, detail="Request is not available for fulfillment")
+
+        current_pledged = request.get("fulfilled_quantity", 0)
+        requested_quantity = request.get("quantity", 0)
+        if current_pledged + data.quantity > requested_quantity:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Only {max(requested_quantity - current_pledged, 0)} servings remain for this request",
+            )
+
+        selected_volunteer_name = None
+        if data.delivery_method == "volunteer":
+            volunteer = await db.volunteers.find_one(
+                {"user_id": data.volunteer_id, "status": "approved"}, {"_id": 0}, session=session
+            )
+            if not volunteer:
+                raise HTTPException(status_code=400, detail="The selected volunteer is no longer available")
+            volunteer_user = await db.users.find_one(
+                {"id": data.volunteer_id, "role": "volunteer", "is_active": {"$ne": False}},
+                {"name": 1, "_id": 0},
+                session=session,
+            )
+            if not volunteer_user:
+                raise HTTPException(status_code=400, detail="The selected volunteer is no longer available")
+            selected_volunteer_name = volunteer_user.get("name", "Volunteer")
+
+        initial_status = "delivered" if data.delivery_method == "self" and data.delivered else "pending"
+        fulfillment = DonorFulfillment(
             request_id=data.request_id,
             donor_id=user["id"],
-            ngo_id=request["ngo_id"],
-            pickup_location=data.geo_tag or {"lat": 0, "lng": 0},
-            pickup_address="Donor location",
-            dropoff_location=request.get("location", {"lat": 0, "lng": 0}),
-            dropoff_address=request.get("address", "NGO location")
+            donor_name=user.get("name", "Anonymous Donor"),
+            donor_type=data.donor_type,
+            volunteer_id=data.volunteer_id if data.delivery_method == "volunteer" else None,
+            volunteer_name=selected_volunteer_name,
+            idempotency_key=idempotency_key,
+            quantity=data.quantity,
+            food_condition=data.food_condition,
+            availability_time=datetime.fromisoformat(data.availability_time.replace("Z", "+00:00")),
+            food_photo=data.food_photo,
+            geo_tag=data.geo_tag,
+            delivery_method=data.delivery_method,
+            delivered=data.delivered,
+            status=initial_status,
         )
-        del_dict = delivery.model_dump()
-        del_dict['created_at'] = del_dict['created_at'].isoformat()
-        await db.deliveries.insert_one(del_dict)
-    
-    return {"message": "Fulfillment created", "fulfillment": ful_dict}
+
+        new_pledged = current_pledged + data.quantity
+        new_request_status = "awaiting_delivery" if new_pledged >= requested_quantity else "active"
+        request_filter = {"id": data.request_id, "status": {"$in": ["approved", "active"]}}
+        if "fulfilled_quantity" in request:
+            request_filter["fulfilled_quantity"] = current_pledged
+        else:
+            request_filter["fulfilled_quantity"] = {"$exists": False}
+
+        reservation = await db.food_requests.update_one(
+            request_filter,
+            {"$set": {"status": new_request_status, "fulfilled_quantity": new_pledged}},
+            session=session,
+        )
+        if not reservation.matched_count:
+            raise HTTPException(status_code=409, detail="Another donor updated this request. Refresh and try again")
+
+        fulfillment_document = fulfillment.model_dump()
+        if not fulfillment_document.get("idempotency_key"):
+            fulfillment_document.pop("idempotency_key", None)
+        fulfillment_document["created_at"] = fulfillment_document["created_at"].isoformat()
+        fulfillment_document["availability_time"] = fulfillment_document["availability_time"].isoformat()
+        if fulfillment_document.get("confirmed_at"):
+            fulfillment_document["confirmed_at"] = fulfillment_document["confirmed_at"].isoformat()
+        await db.fulfillments.insert_one(fulfillment_document, session=session)
+
+        if data.delivery_method == "volunteer":
+            delivery = Delivery(
+                fulfillment_id=fulfillment.id,
+                request_id=data.request_id,
+                donor_id=user["id"],
+                ngo_id=request["ngo_id"],
+                volunteer_id=data.volunteer_id,
+                pickup_location=data.geo_tag,
+                pickup_address="Donor pickup location",
+                dropoff_location=request.get("location", {"lat": 0, "lng": 0}),
+                dropoff_address=request.get("address", "NGO location"),
+                status="assigned",
+            )
+            delivery_document = delivery.model_dump()
+            delivery_document["created_at"] = delivery_document["created_at"].isoformat()
+            await db.deliveries.insert_one(delivery_document, session=session)
+
+        return fulfillment_document
+
+    try:
+        async with await client.start_session() as session:
+            fulfillment_document = await session.with_transaction(create_in_transaction)
+        return {"message": "Fulfillment created", "fulfillment": fulfillment_document}
+    except DuplicateKeyError:
+        if idempotency_key:
+            existing = await db.fulfillments.find_one(
+                {"idempotency_key": idempotency_key, "donor_id": user["id"]}, {"_id": 0}
+            )
+            if existing and existing.get("request_id") == data.request_id:
+                return {"message": "Fulfillment already submitted", "fulfillment": existing, "duplicate": True}
+        raise
 
 @api_router.get("/donor/fulfillments")
 async def get_donor_fulfillments(user: Dict = Depends(get_current_user)):
@@ -1003,15 +1184,23 @@ async def accept_delivery(delivery_id: str, user: Dict = Depends(get_current_use
 @api_router.post("/volunteer/deliveries/{delivery_id}/pickup")
 async def pickup_delivery(delivery_id: str, user: Dict = Depends(get_current_user)):
     """Mark delivery as picked up"""
+    if user.get("role") != "volunteer":
+        raise HTTPException(status_code=403, detail="Only the assigned volunteer can confirm pickup")
     delivery = await db.deliveries.find_one({"id": delivery_id, "volunteer_id": user["id"]}, {"_id": 0})
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
-    
-    await db.deliveries.update_one(
-        {"id": delivery_id},
+    if delivery.get("status") in {"picked_up", "in_transit", "delivered", "confirmed"}:
+        return {"message": "Pickup already confirmed"}
+    if delivery.get("status") != "assigned":
+        raise HTTPException(status_code=409, detail="This delivery is not ready for pickup")
+
+    result = await db.deliveries.update_one(
+        {"id": delivery_id, "volunteer_id": user["id"], "status": "assigned"},
         {"$set": {"status": "picked_up", "picked_up_at": datetime.now(timezone.utc).isoformat()}}
     )
-    
+    if not result.modified_count:
+        raise HTTPException(status_code=409, detail="This delivery was updated by another action. Refresh and try again")
+
     return {"message": "Pickup confirmed"}
 
 @api_router.post("/volunteer/deliveries/{delivery_id}/complete")
@@ -1021,19 +1210,42 @@ async def complete_delivery(
     user: Dict = Depends(get_current_user)
 ):
     """Complete a delivery with proof"""
+    if user.get("role") != "volunteer":
+        raise HTTPException(status_code=403, detail="Only a volunteer can complete a delivery")
     delivery = await db.deliveries.find_one({"id": delivery_id, "volunteer_id": user["id"]}, {"_id": 0})
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
-    
-    await db.deliveries.update_one(
-        {"id": delivery_id},
+
+    if delivery.get("status") in {"delivered", "confirmed"}:
+        await db.fulfillments.update_one(
+            {"id": delivery["fulfillment_id"], "status": {"$nin": ["delivered", "confirmed"]}},
+            {"$set": {
+                "status": "delivered",
+                "delivered": True,
+                "delivered_at": delivery.get("delivered_at", datetime.now(timezone.utc).isoformat()),
+            }}
+        )
+        return {"message": "Delivery already marked delivered"}
+    if delivery.get("status") != "picked_up":
+        raise HTTPException(status_code=409, detail="Confirm pickup before completing this delivery")
+
+    delivered_at = datetime.now(timezone.utc).isoformat()
+    result = await db.deliveries.update_one(
+        {"id": delivery_id, "volunteer_id": user["id"], "status": "picked_up"},
         {"$set": {
             "status": "delivered",
-            "delivered_at": datetime.now(timezone.utc).isoformat(),
+            "delivered_at": delivered_at,
             "delivery_proof": delivery_proof
         }}
     )
-    
+    if not result.modified_count:
+        raise HTTPException(status_code=409, detail="This delivery was updated by another action. Refresh and try again")
+
+    await db.fulfillments.update_one(
+        {"id": delivery["fulfillment_id"], "status": {"$ne": "confirmed"}},
+        {"$set": {"status": "delivered", "delivered": True, "delivered_at": delivered_at}}
+    )
+
     await db.volunteers.update_one(
         {"user_id": user["id"]},
         {"$inc": {"delivery_count": 1}}
@@ -1563,10 +1775,14 @@ async def make_admin(email: str):
 
 app.include_router(api_router)
 
+@app.on_event("startup")
+async def ensure_fulfillment_idempotency_index():
+    await db.fulfillments.create_index("idempotency_key", unique=True, sparse=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=[origin.strip().rstrip("/") for origin in os.environ.get('CORS_ORIGINS', '*').split(',') if origin.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )

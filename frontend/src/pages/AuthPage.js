@@ -6,7 +6,7 @@ import { Input } from '../components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Label } from '../components/ui/label';
 import { Building2, Heart, Truck, ArrowRight, Check, Phone, Shield } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
@@ -16,11 +16,22 @@ const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 export const AuthPage = () => {
   const { login, verifyPhone, selectRole, user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [step, setStep] = useState('login'); // login, phone, role
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [otpSent, setOtpSent] = useState(false);
+
+  const navigateToRole = (role) => {
+    const returnTo = location.state?.returnTo;
+    const safeReturnTo = role === 'donor'
+      && typeof returnTo === 'string'
+      && /^\/donor\?request_id=[\w-]+$/.test(returnTo)
+      ? returnTo
+      : `/${role}`;
+    navigate(safeReturnTo);
+  };
 
   const handleGoogleSuccess = async (credentialResponse) => {
     setLoading(true);
@@ -29,7 +40,7 @@ export const AuthPage = () => {
       toast.success('Signed in successfully!');
       
       if (result.user.phone_verified && result.user.role) {
-        navigate(`/${result.user.role}`);
+        navigateToRole(result.user.role);
       } else if (result.user.phone_verified) {
         setStep('role');
       } else {
@@ -63,7 +74,7 @@ export const AuthPage = () => {
       toast.success('Phone verified!');
       
       if (user?.role) {
-        navigate(`/${user.role}`);
+        navigateToRole(user.role);
       } else {
         setStep('role');
       }
@@ -79,7 +90,7 @@ export const AuthPage = () => {
     try {
       await selectRole(role);
       toast.success(`Welcome as ${role}!`);
-      navigate(`/${role}`);
+      navigateToRole(role);
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Role selection failed');
     } finally {

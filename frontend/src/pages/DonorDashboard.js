@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useSearchParams } from 'react-router-dom';
 import { requestApi, donorApi, analyticsApi } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -25,6 +26,7 @@ import { toast } from 'sonner';
 
 export const DonorDashboard = () => {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [requests, setRequests] = useState([]);
   const [fulfillments, setFulfillments] = useState([]);
   const [analytics, setAnalytics] = useState(null);
@@ -37,6 +39,7 @@ export const DonorDashboard = () => {
     urgency: 'all',
   });
   const [userLocation, setUserLocation] = useState(null);
+  const sharedRequestId = searchParams.get('request_id');
 
   const fetchData = useCallback(async () => {
     try {
@@ -82,6 +85,15 @@ export const DonorDashboard = () => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (!sharedRequestId || loading || requests.length === 0) return;
+    const sharedRequest = requests.find((request) => request.id === sharedRequestId);
+    if (sharedRequest) {
+      setSelectedRequest(sharedRequest);
+      setSearchParams({}, { replace: true });
+    }
+  }, [sharedRequestId, loading, requests, setSearchParams]);
 
   const getUrgencyColor = (urgency) => {
     const colors = {
@@ -362,6 +374,11 @@ export const DonorDashboard = () => {
                         <p className="text-sm text-muted-foreground">
                           Delivery: {fulfillment.delivery_method}
                         </p>
+                        {fulfillment.volunteer_name && (
+                          <p className="text-sm text-muted-foreground">
+                            Volunteer: {fulfillment.volunteer_name}
+                          </p>
+                        )}
                       </div>
                       <Badge className={
                         fulfillment.status === 'confirmed' ? 'bg-success text-success-foreground' :

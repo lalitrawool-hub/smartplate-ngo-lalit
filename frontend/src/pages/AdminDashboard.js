@@ -372,13 +372,13 @@ export const AdminDashboard = () => {
                             <div className="flex items-center gap-2">
                               <h4 className="font-semibold">{request.ngo_name}</h4>
                               <Badge className={
-                                request.status === 'approved' || request.status === 'active' 
+                                request.status === 'approved' || request.status === 'active' || request.status === 'fulfilled'
                                   ? 'bg-success text-success-foreground' 
-                                  : request.status === 'pending' 
+                                  : request.status === 'pending' || request.status === 'awaiting_delivery'
                                     ? 'bg-warning text-warning-foreground'
                                     : 'bg-secondary text-secondary-foreground'
                               }>
-                                {request.status}
+                                {request.status.replace(/_/g, ' ')}
                               </Badge>
                               {request.ai_urgency_score && (
                                 <Badge className="bg-primary/10 text-primary">

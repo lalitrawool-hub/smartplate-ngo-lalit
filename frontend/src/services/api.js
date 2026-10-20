@@ -33,12 +33,20 @@ export const requestApi = {
   
   getById: (id) => 
     axios.get(`${API}/requests/${id}`, { headers: getAuthHeader() }),
+
+  getPublicById: (id) =>
+    axios.get(`${API}/public/requests/${id}`),
 };
 
 // Donor APIs
 export const donorApi = {
-  createFulfillment: (data) => 
-    axios.post(`${API}/donor/fulfill`, data, { headers: getAuthHeader() }),
+  createFulfillment: (data, idempotencyKey) =>
+    axios.post(`${API}/donor/fulfill`, data, {
+      headers: { ...getAuthHeader(), 'Idempotency-Key': idempotencyKey },
+    }),
+
+  getAvailableVolunteers: () =>
+    axios.get(`${API}/donor/available-volunteers`, { headers: getAuthHeader() }),
   
   getFulfillments: () => 
     axios.get(`${API}/donor/fulfillments`, { headers: getAuthHeader() }),
